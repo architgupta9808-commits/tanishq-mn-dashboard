@@ -859,13 +859,15 @@ def load_cn(_token: float) -> pd.DataFrame:
 # 3. METRIC ENGINE  (per RSO per month, store rollups)
 # ---------------------------------------------------------------------------
 def studded_pieces(df: pd.DataFrame) -> int:
-    """Count studded SALE lines (exclude returns)."""
-    return int(((df["IS_STUDDED"]) & (~df["IS_RETURN"])).sum())
+    """Sum QTY of studded sale pieces (exclude returns)."""
+    mask = (df["IS_STUDDED"]) & (~df["IS_RETURN"])
+    return int(df.loc[mask, "QTY"].fillna(1).sum())
 
 
 def hvs_pieces(df: pd.DataFrame) -> int:
     thr = hvs_threshold()
-    return int(((df["IS_STUDDED"]) & (~df["IS_RETURN"]) & (df["CMTOTAL"] >= thr)).sum())
+    mask = (df["IS_STUDDED"]) & (~df["IS_RETURN"]) & (df["AMT"].fillna(0) >= thr)
+    return int(df.loc[mask, "QTY"].fillna(1).sum())
 
 
 def rso_month_slice(sales: pd.DataFrame, rso: str, month: int) -> pd.DataFrame:
@@ -1497,10 +1499,14 @@ def page_performance(sales, ghs, rso_targets, month, view_rso, role):
     sp = studded_pieces(rsl)
     hv = hvs_pieces(rsl)
     ghs_red_lakhs = rsl_pos["GHS-AMT"].sum() / 100000.0
-    gep_bills = int((rsl_pos["GEP-AMT"].fillna(0) > 0).sum())
-    total_bills = int(len(rsl_pos))
+    _has_docno = "DOCNO" in rsl_pos.columns
+    total_bills = int(rsl_pos["DOCNO"].nunique()) if _has_docno else int(len(rsl_pos))
+    _gep_wt_col = "GEP-WT" if "GEP-WT" in rsl_pos.columns else "GEP-AMT"
+    _gep_mask = rsl_pos[_gep_wt_col].fillna(0) > 0
+    gep_bills = (int(rsl_pos.loc[_gep_mask, "DOCNO"].nunique()) if _has_docno
+                 else int(_gep_mask.sum()))
     gep_bill_pct = (gep_bills / total_bills * 100) if total_bills > 0 else 0
-    gep_val_lakhs = rsl_pos["GEP-AMT"].sum() / 100000.0
+    gep_val_lakhs = rsl_pos["GEP-AMT"].sum() / 100000.0 if "GEP-AMT" in rsl_pos.columns else 0
     aev = (total_value / total_bills) if total_bills else 0
     share = (stud_value / total_value * 100) if total_value else 0
 
@@ -2670,7 +2676,8 @@ def _rso_metric_table(sales, ghs, rso_targets, month, metric):
         rsl_pos = rsl[~rsl["IS_RETURN"]]
         val = rsl_pos["CMTOTAL"].clip(lower=0).sum()
         stud_val = rsl_pos.loc[rsl_pos["IS_STUDDED"], "CMTOTAL"].clip(lower=0).sum()
-        bills = len(rsl_pos)
+        _hd = "DOCNO" in rsl_pos.columns
+        bills = int(rsl_pos["DOCNO"].nunique()) if _hd else int(len(rsl_pos))
         if metric == "value":           m = val
         elif metric == "studded_value": m = stud_val
         elif metric == "studded_pcs":   m = studded_pieces(rsl)
@@ -2681,7 +2688,9 @@ def _rso_metric_table(sales, ghs, rso_targets, month, metric):
         elif metric == "studded_share":
             m = (stud_val / val * 100) if val else 0
         elif metric == "gep_pct":
-            gb = int((rsl_pos["GEP-AMT"].fillna(0) > 0).sum())
+            _gc = "GEP-WT" if "GEP-WT" in rsl_pos.columns else "GEP-AMT"
+            _gm = rsl_pos[_gc].fillna(0) > 0
+            gb = int(rsl_pos.loc[_gm, "DOCNO"].nunique()) if _hd else int(_gm.sum())
             m = (gb / bills * 100) if bills else 0
         elif metric == "upsell":
             red = rsl_pos["GHS-AMT"].sum() / 100000.0
@@ -2868,7 +2877,7 @@ def page_admin(sales, ghs, rso_targets, store_targets, month):
             rsl = rso_month_slice(sales, pick, month)[~rso_month_slice(sales, pick, month)["IS_RETURN"]]
             val = rsl["CMTOTAL"].clip(lower=0).sum()
             stud_val = rsl.loc[rsl["IS_STUDDED"], "CMTOTAL"].clip(lower=0).sum()
-            bills = len(rsl)
+            bills = int(rsl["DOCNO"].nunique()) if "DOCNO" in rsl.columns else int(len(rsl))
             rso_tgt = rso_targets[(rso_targets["EMPLOYEE NAME"]==pick.upper()) & (rso_targets["MONTH"]==int(month))]
             tgt_val = float(rso_tgt["TOTAL"].iloc[0]) if len(rso_tgt)>0 and "TOTAL" in rso_tgt.columns else 100.0
             
@@ -2882,7 +2891,7 @@ def page_admin(sales, ghs, rso_targets, store_targets, month):
             metrics_df = pd.DataFrame({
                 "Metric": ["Value", "Studded Value", "Plain Value", "Bills", "GEP Bills %", "Avg Ticket", "Pieces", "HVS", "GHS", "Upsell %"],
                 "Value": [f"₹{val:.1f}L", f"₹{stud_val:.1f}L", f"₹{rsl.loc[~rsl['IS_STUDDED'], 'CMTOTAL'].clip(lower=0).sum():.1f}L",
-                         f"{bills}", f"{int((rsl['GEP-AMT'].fillna(0)>0).sum())}/{bills}", f"₹{val/bills:.2f}L" if bills else "—",
+                         f"{bills}", f"{(int(rsl.loc[rsl['GEP-WT'].fillna(0)>0,'DOCNO'].nunique()) if 'DOCNO' in rsl.columns else int((rsl['GEP-WT'].fillna(0)>0).sum())) if 'GEP-WT' in rsl.columns else '—'}/{bills}", f"₹{val/bills:.2f}L" if bills else "—",
                          f"{res['studded_pieces']}", f"{res['hvs_pieces']}", f"{res['ghs_opens']}",
                          f"{(rsl['GHS-AMT'].sum()/100000)/val*100:.1f}%" if val else "—"]
             })
@@ -3075,7 +3084,7 @@ def page_admin(sales, ghs, rso_targets, store_targets, month):
                     sp = studded_pieces(rsl)
                     hv = hvs_pieces(rsl)
                     op = ghs_opens_in_month(ghs, r, cmp_month)["TOTAL"]
-                    bills = len(rp)
+                    bills = int(rp["DOCNO"].nunique()) if "DOCNO" in rp.columns else int(len(rp))
                     aev = v/bills if bills else 0
                     share = sv/v*100 if v else 0
                     inc = compute_incentive(sales, ghs, r, cmp_month)["total"]
