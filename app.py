@@ -3357,8 +3357,9 @@ def main():
         # ── Month-end pressure widget ─────────────────────────────────────
         st.divider()
         today_d = dt.date.today()
-        days_in_month = (dt.date(today_d.year, today_d.month % 12 + 1, 1)
-                         - dt.timedelta(days=1)).day if today_d.month < 12 else 31
+        _next_m = today_d.month % 12 + 1
+        _next_y = today_d.year + (1 if today_d.month == 12 else 0)
+        days_in_month = (dt.date(_next_y, _next_m, 1) - dt.timedelta(days=1)).day
         days_left = days_in_month - today_d.day
         pct_elapsed = today_d.day / days_in_month
 
@@ -3395,7 +3396,7 @@ def main():
             # Store-level pressure
             cur_m = int(months[-1])
             store_val = sales[(sales["MONTH"] == cur_m) & (~sales["IS_RETURN"])]["CMTOTAL"].clip(lower=0).sum()
-            store_tgt = store_targets[store_targets["MONTH"] == cur_m]["TOTAL"].sum() if len(store_targets) else 0
+            store_tgt = store_target(store_targets, 0, cur_m, default=0.0)  # row 0 = total store target
             remaining = max(store_tgt - store_val, 0)
             per_day   = remaining / days_left if days_left > 0 else remaining
             pct_done  = store_val / store_tgt if store_tgt else 0
