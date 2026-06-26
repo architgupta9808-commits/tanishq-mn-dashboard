@@ -666,6 +666,7 @@ SALES_FILE = "Sales_Data.xlsx"
 GHS_FILE = "ghs_OPENING.xlsx"
 TARGETS_FILE = "targets.xlsx"
 SLUDGE_FILE = "sludge.xlsx"
+CN_FILE = "pendingCN.xlsx"
 
 # GHS/RGA account maturity windows (days since opening before it goes inactive)
 GHS_INACTIVE_DAYS = 400
@@ -795,6 +796,47 @@ def load_sludge(_token: float) -> pd.DataFrame:
     if "ItemCode" in df.columns:
         df["THEME"] = df["ItemCode"].apply(theme_code)
         df["IMG"] = df["ItemCode"].apply(product_image_url)
+    return df
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def load_cn(_token: float) -> pd.DataFrame:
+    try:
+        df = pd.read_excel(CN_FILE)
+    except FileNotFoundError:
+        return pd.DataFrame()
+    df.columns = [str(c).strip() for c in df.columns]
+    df["DAYS"]   = pd.to_numeric(df["DAYS"],   errors="coerce").fillna(0)
+    df["AMOUNT"] = pd.to_numeric(df["AMOUNT"], errors="coerce").fillna(0)
+    df["RSO NAME"] = df["RSO NAME"].astype(str).str.strip().str.upper().apply(normalize_rso_name)
+    df["MOBILE"]   = df["MOBILE"].astype(str).str.strip()
+
+    cur   = df["CUR STATUS"].astype(str).str.upper().str.strip()
+    cn_t  = df["CN TYPE"].astype(str).str.upper().str.strip()
+    trans = df["TRANS-UID"].astype(str).str.upper()
+    days  = df["DAYS"]
+
+    flag_free    = cur == "FREE"
+    flag_ghs     = (cn_t == "GHS") & (days > 400)
+    flag_advbook = trans.str.contains("ADVBOOK", na=False) & (days > 30)
+    flag_co      = trans.str.contains(r"\bCO\b", regex=True, na=False) & (days > 60)
+
+    df["ALERT"] = flag_free | flag_ghs | flag_advbook | flag_co
+
+    def _reason(row):
+        r = []
+        if row["_free"]:    r.append("FREE — must be booked")
+        if row["_ghs"]:     r.append("GHS overdue >400 days")
+        if row["_advbook"]: r.append("ADVBOOK overdue >30 days")
+        if row["_co"]:      r.append("CO overdue >60 days")
+        return ", ".join(r)
+
+    df["_free"]    = flag_free
+    df["_ghs"]     = flag_ghs
+    df["_advbook"] = flag_advbook
+    df["_co"]      = flag_co
+    df["ALERT REASON"] = df.apply(_reason, axis=1)
+    df.drop(columns=["_free", "_ghs", "_advbook", "_co"], inplace=True)
     return df
 
 
@@ -1744,7 +1786,7 @@ def page_ghs(sales, ghs, month, view_rso, role):
 # ---------------------------------------------------------------------------
 # 11. PAGE — CUSTOMER DATA
 # ---------------------------------------------------------------------------
-def page_customers(sales, ghs, month, view_rso, role):
+def page_customers(sales, ghs, cn, month, view_rso, role):
     page_header("👥", "Customer Data", "Search · follow-up lists · upsell opportunities")
     scope = sales[sales["RSO_FINAL"] == view_rso] if view_rso else sales
     is_mgr = role in ("Admin", "Store Manager", "Floor Manager", "MD")
@@ -1825,6 +1867,34 @@ def page_customers(sales, ghs, month, view_rso, role):
                 with ic2:
                     st.caption("Tip: studded/designer pieces have catalogue images. "
                                "Plain gold and coins may show 'Image unavailable'.")
+
+    # ── PENDING CREDIT NOTES for selected customer ────────────────────────────
+    if len(grp) and cn is not None and not cn.empty:
+        pick_mob = grp.loc[grp["CUSTOMERNAME"] == pick, "MOBILE"].values
+        pick_mob_str = str(pick_mob[0]).strip() if len(pick_mob) else ""
+        cust_cns = cn[
+            cn["MOBILE"].astype(str).str.strip() == pick_mob_str
+        ] if pick_mob_str else pd.DataFrame()
+        if not cust_cns.empty:
+            alert_cns = cust_cns[cust_cns["ALERT"]]
+            label = f"📋 Pending Credit Notes — {len(cust_cns)} CN(s)"
+            if len(alert_cns):
+                label += f"  🔴 {len(alert_cns)} require action"
+            with st.expander(label, expanded=bool(len(alert_cns))):
+                def _style_cn(row):
+                    if row.get("ALERT", False):
+                        return ["background-color:#FFF0F0;color:#8B0000;font-weight:500"] * len(row)
+                    return [""] * len(row)
+                cn_disp = cust_cns[["CN TYPE", "AMOUNT", "DAYS", "CUR STATUS", "ALERT REASON"]].copy()
+                cn_disp["AMOUNT"] = cn_disp["AMOUNT"].apply(lambda x: f"₹{x:,.0f}")
+                cn_disp["DAYS"]   = cn_disp["DAYS"].apply(lambda x: f"{int(x)} days")
+                cn_disp["ALERT"]  = cust_cns["ALERT"].values
+                st.dataframe(
+                    cn_disp.drop(columns=["ALERT"]).style.apply(
+                        lambda r: _style_cn(cust_cns.iloc[r.name]), axis=1
+                    ),
+                    hide_index=True, use_container_width=True,
+                )
 
     # ── FOLLOW-UP LIST ─────────────────────────────────────────────────────────
     st.markdown("---")
@@ -2298,6 +2368,73 @@ def page_sludge(sludge, month):
             with col:
                 st.markdown(product_card(r.get("IMG", ""), title, lines, badge=badge),
                             unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
+# 13. PAGE — CREDIT NOTES
+# ---------------------------------------------------------------------------
+def page_cn(cn: pd.DataFrame, view_rso, role):
+    page_header("📋", "Credit Notes", "Pending CNs · action required · overdue alerts")
+
+    if cn is None or cn.empty:
+        st.info(f"Upload **{CN_FILE}** via the Data Manager to see pending credit notes here.")
+        return
+
+    is_mgr = role in ("Admin", "Store Manager", "Floor Manager", "MD")
+
+    # scope to RSO if not a manager
+    scope = cn.copy()
+    if not is_mgr and view_rso:
+        scope = scope[scope["RSO NAME"] == view_rso.upper()]
+
+    alerts = scope[scope["ALERT"]].copy()
+    clean  = scope[~scope["ALERT"]].copy()
+
+    DISPLAY_COLS = ["CN TYPE", "AMOUNT", "CUSTOMER NAME", "MOBILE", "DAYS", "ALERT REASON"]
+    # column name in file is "CUSTOMER NAME"
+    disp_cols = [c for c in DISPLAY_COLS if c in scope.columns]
+
+    def _fmt_amount(df):
+        d = df[disp_cols].copy()
+        d["AMOUNT"] = d["AMOUNT"].apply(lambda x: f"₹{x:,.0f}")
+        d["DAYS"]   = d["DAYS"].apply(lambda x: f"{int(x)} days")
+        return d
+
+    # ── summary bar ──────────────────────────────────────────────────────────
+    c1, c2, c3, c4 = st.columns(4)
+    with c1: kpi("Total CNs", f"{len(scope):,}")
+    with c2: kpi("🔴 Alerts", f"{len(alerts):,}")
+    with c3: kpi("Alert Amount", f"₹{alerts['AMOUNT'].sum():,.0f}")
+    with c4: kpi("Total Amount", f"₹{scope['AMOUNT'].sum():,.0f}")
+
+    # ── alert table (always expanded) ────────────────────────────────────────
+    st.markdown("---")
+    st.markdown(f"### 🔴 Action Required — {len(alerts)} CNs")
+    st.caption("These CNs must be closed or booked. FREE CNs must be applied to a bill.")
+
+    if len(alerts):
+        def _red_style(row):
+            return ["background-color: #FFF0F0; color: #8B0000; font-weight: 500"] * len(row)
+
+        alert_display = _fmt_amount(alerts.sort_values("DAYS", ascending=False))
+        st.dataframe(
+            alert_display.style.apply(_red_style, axis=1),
+            hide_index=True,
+            use_container_width=True,
+        )
+    else:
+        st.success("No alerts — all CNs are within acceptable thresholds.")
+
+    # ── full list ─────────────────────────────────────────────────────────────
+    with st.expander(f"📄 All CNs — {len(scope)} rows", expanded=False):
+        if is_mgr:
+            rso_filter = ["(all RSOs)"] + sorted(scope["RSO NAME"].dropna().unique().tolist())
+            sel_rso = st.selectbox("Filter by RSO", rso_filter, key="cn_rso_filter")
+            view = scope if sel_rso == "(all RSOs)" else scope[scope["RSO NAME"] == sel_rso]
+        else:
+            view = scope
+        st.dataframe(_fmt_amount(view.sort_values("DAYS", ascending=False)),
+                     hide_index=True, use_container_width=True)
 
 
 # ---------------------------------------------------------------------------
@@ -2918,6 +3055,12 @@ def page_data_manager(role):
             "required_cols": ["ItemCode", "Cur-Final"],
             "key": "upload_sludge",
         },
+        "pendingCN.xlsx": {
+            "label": "📋 Pending Credit Notes",
+            "description": "Open credit notes from POSReports. Columns: CN TYPE, AMOUNT, CUSTOMER NAME, MOBILE, DAYS, CUR STATUS, TRANS-UID, RSO NAME.",
+            "required_cols": ["CN TYPE", "AMOUNT", "DAYS", "CUR STATUS", "RSO NAME"],
+            "key": "upload_cn",
+        },
     }
 
     upload_results = []
@@ -3005,6 +3148,7 @@ def main():
     ghs = load_ghs(st.session_state.refresh_token)
     rso_targets, store_targets = load_targets(st.session_state.refresh_token)
     sludge = load_sludge(st.session_state.refresh_token)
+    cn = load_cn(st.session_state.refresh_token)
 
     # auth gate
     if not st.session_state.get("auth"):
@@ -3034,7 +3178,7 @@ def main():
             view_rso = None if pick == "(store overview)" else pick
 
         pages = ["Performance", "Incentive", "GHS / RGA", "Customers",
-                 "Stock", "Sludge", "Tasks", "Analytics"]
+                 "Stock", "Sludge", "Tasks", "Analytics", "Credit Notes"]
         if is_mgr:
             pages += ["Admin", "Data Manager"]
         page = st.radio("Navigate", pages)
@@ -3072,7 +3216,7 @@ def main():
     elif page == "GHS / RGA":
         page_ghs(sales, ghs, month, view_rso, role)
     elif page == "Customers":
-        page_customers(sales, ghs, month, view_rso, role)
+        page_customers(sales, ghs, cn, month, view_rso, role)
     elif page == "Stock":
         page_stock_intel(view_rso=view_rso)
     elif page == "Sludge":
@@ -3081,6 +3225,8 @@ def main():
         page_analytics()
     elif page == "Tasks":
         page_tickets(sales, ghs, month, view_rso, role)
+    elif page == "Credit Notes":
+        page_cn(cn, view_rso, role)
     elif page == "Admin":
         page_admin(sales, ghs, rso_targets, store_targets, month)
     elif page == "Data Manager":
