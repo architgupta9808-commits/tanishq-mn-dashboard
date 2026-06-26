@@ -2387,53 +2387,73 @@ def page_cn(cn: pd.DataFrame, view_rso, role):
     if not is_mgr and view_rso:
         scope = scope[scope["RSO NAME"] == view_rso.upper()]
 
-    alerts = scope[scope["ALERT"]].copy()
-    clean  = scope[~scope["ALERT"]].copy()
+    # split by priority
+    priority1 = scope[pd.to_numeric(scope["PRIORITY"], errors="coerce") == 1].copy()
+    others    = scope[pd.to_numeric(scope["PRIORITY"], errors="coerce") != 1].copy()
 
     DISPLAY_COLS = ["CN TYPE", "AMOUNT", "CUSTOMER NAME", "MOBILE", "DAYS", "ALERT REASON"]
-    # column name in file is "CUSTOMER NAME"
     disp_cols = [c for c in DISPLAY_COLS if c in scope.columns]
 
-    def _fmt_amount(df):
+    def _fmt(df):
         d = df[disp_cols].copy()
         d["AMOUNT"] = d["AMOUNT"].apply(lambda x: f"₹{x:,.0f}")
         d["DAYS"]   = d["DAYS"].apply(lambda x: f"{int(x)} days")
         return d
 
-    # ── summary bar ──────────────────────────────────────────────────────────
-    c1, c2, c3, c4 = st.columns(4)
-    with c1: kpi("Total CNs", f"{len(scope):,}")
-    with c2: kpi("🔴 Alerts", f"{len(alerts):,}")
-    with c3: kpi("Alert Amount", f"₹{alerts['AMOUNT'].sum():,.0f}")
-    with c4: kpi("Total Amount", f"₹{scope['AMOUNT'].sum():,.0f}")
+    def _red_style(row):
+        return ["background-color:#FFF0F0;color:#8B0000;font-weight:500"] * len(row)
 
-    # ── alert table (always expanded) ────────────────────────────────────────
-    st.markdown("---")
-    st.markdown(f"### 🔴 Action Required — {len(alerts)} CNs")
-    st.caption("These CNs must be closed or booked. FREE CNs must be applied to a bill.")
-
-    if len(alerts):
-        def _red_style(row):
-            return ["background-color: #FFF0F0; color: #8B0000; font-weight: 500"] * len(row)
-
-        alert_display = _fmt_amount(alerts.sort_values("DAYS", ascending=False))
-        st.dataframe(
-            alert_display.style.apply(_red_style, axis=1),
-            hide_index=True,
-            use_container_width=True,
-        )
-    else:
-        st.success("No alerts — all CNs are within acceptable thresholds.")
-
-    # ── full list ─────────────────────────────────────────────────────────────
-    with st.expander(f"📄 All CNs — {len(scope)} rows", expanded=False):
+    def _rso_filter(df, key):
         if is_mgr:
-            rso_filter = ["(all RSOs)"] + sorted(scope["RSO NAME"].dropna().unique().tolist())
-            sel_rso = st.selectbox("Filter by RSO", rso_filter, key="cn_rso_filter")
-            view = scope if sel_rso == "(all RSOs)" else scope[scope["RSO NAME"] == sel_rso]
+            opts = ["(all RSOs)"] + sorted(df["RSO NAME"].dropna().unique().tolist())
+            sel  = st.selectbox("Filter by RSO", opts, key=key)
+            return df if sel == "(all RSOs)" else df[df["RSO NAME"] == sel]
+        return df
+
+    tab_audit, tab_others = st.tabs([
+        f"🔴 Audit Priority ({len(priority1)})",
+        f"📄 Others / Low Priority ({len(others)})",
+    ])
+
+    # ── TAB 1: Priority 1 ────────────────────────────────────────────────────
+    with tab_audit:
+        alerts = priority1[priority1["ALERT"]].copy()
+        ok     = priority1[~priority1["ALERT"]].copy()
+
+        c1, c2, c3, c4 = st.columns(4)
+        with c1: kpi("Priority CNs",  f"{len(priority1):,}")
+        with c2: kpi("🔴 Alerts",     f"{len(alerts):,}")
+        with c3: kpi("Alert Amount",  f"₹{alerts['AMOUNT'].sum():,.0f}")
+        with c4: kpi("Total Amount",  f"₹{priority1['AMOUNT'].sum():,.0f}")
+
+        st.markdown("---")
+        st.markdown(f"### 🔴 Action Required — {len(alerts)} CNs")
+        st.caption("FREE CNs must be booked against a bill. GHS/ADVBOOK/CO overdue must be closed.")
+
+        if len(alerts):
+            st.dataframe(
+                _fmt(alerts.sort_values("DAYS", ascending=False))
+                .style.apply(_red_style, axis=1),
+                hide_index=True, use_container_width=True,
+            )
         else:
-            view = scope
-        st.dataframe(_fmt_amount(view.sort_values("DAYS", ascending=False)),
+            st.success("No alerts in Priority 1 CNs.")
+
+        if len(ok):
+            with st.expander(f"✅ Priority 1 — within limits ({len(ok)} CNs)", expanded=False):
+                view = _rso_filter(ok, "cn_ok_rso")
+                st.dataframe(_fmt(view.sort_values("DAYS", ascending=False)),
+                             hide_index=True, use_container_width=True)
+
+    # ── TAB 2: Others ────────────────────────────────────────────────────────
+    with tab_others:
+        st.caption("These CNs are not Priority 1 and are shown for reference only.")
+        c1, c2 = st.columns(2)
+        with c1: kpi("Other CNs",    f"{len(others):,}")
+        with c2: kpi("Total Amount", f"₹{others['AMOUNT'].sum():,.0f}")
+
+        view = _rso_filter(others, "cn_others_rso")
+        st.dataframe(_fmt(view.sort_values("DAYS", ascending=False)),
                      hide_index=True, use_container_width=True)
 
 
