@@ -1851,14 +1851,22 @@ def page_customers(sales, ghs, cn, hist, month, view_rso, role):
         RSO=("RSO_FINAL", "last"),
     ).reset_index().sort_values("Total_Value_L", ascending=False)
 
-    c = st.columns(3)
+    # LTV segments
+    def _ltv_segment(val):
+        if val >= 5:   return "💎 VIP"
+        if val >= 1:   return "⭐ Regular"
+        return          "🔹 One-time"
+    grp["Segment"] = grp["Total_Value_L"].apply(_ltv_segment)
+
+    c = st.columns(4)
     with c[0]: kpi("Unique customers", f"{grp.shape[0]:,}")
-    with c[1]: kpi("New : Existing",
-                   f"{(base['CUSTTYPE']=='NEW').sum()} : {(base['CUSTTYPE']=='EXIST').sum()}")
-    with c[2]: kpi("Avg ticket (₹L)",
+    with c[1]: kpi("💎 VIP (₹5L+)",   f"{(grp['Segment']=='💎 VIP').sum():,}")
+    with c[2]: kpi("⭐ Regular (₹1–5L)", f"{(grp['Segment']=='⭐ Regular').sum():,}")
+    with c[3]: kpi("Avg ticket (₹L)",
                    f"{grp['Total_Value_L'].mean():.2f}" if len(grp) else "0")
 
-    st.dataframe(grp.head(400), hide_index=True, use_container_width=True)
+    st.dataframe(grp[["CUSTOMERNAME","MOBILE","Segment","Total_Value_L","Studded_pcs","Bills","Type","RSO"]].head(400),
+                 hide_index=True, use_container_width=True)
 
     # detail view
     if len(grp):
@@ -2118,7 +2126,7 @@ def page_analytics():
 # ---------------------------------------------------------------------------
 # 11c. PAGE — STOCK INTELLIGENCE
 # ---------------------------------------------------------------------------
-def page_stock_intel(view_rso=None):
+def page_stock_intel(view_rso=None, hist=None):
     page_header("🏪", "Stock Intelligence", "Push recommendations · browse inventory · category breakdown")
     if not AE_AVAILABLE:
         st.info("Analytics engine not available. Ensure `analytics_engine.py` is in the same folder.")
@@ -2141,8 +2149,8 @@ def page_stock_intel(view_rso=None):
     with sv4: kpi("Plain Value", f"₹{summ.get('plain_value_L',0):.0f}L", "including coins")
 
     st.markdown("---")
-    tab_push, tab_browse, tab_cat = st.tabs([
-        "🎯 Push Recommendations", "🖼️ Browse Stock", "📊 By Category"])
+    tab_push, tab_browse, tab_cat, tab_price = st.tabs([
+        "🎯 Push Recommendations", "🖼️ Browse Stock", "📊 By Category", "💰 Price Band"])
 
     with tab_push:
         st.markdown("#### 🎯 SKU-level customer push recommendations")
@@ -2179,7 +2187,7 @@ def page_stock_intel(view_rso=None):
                         f'{len(df)} pieces to push</span>'
                         f'<span style="font-size:13px;color:{MUTED};">·</span>'
                         f'<span style="font-size:13px;color:{MUTED};">'
-                        f'₹{df["Value (₹L)"].sum():.1f}L total value</span></div>',
+                        f'₹{df["Value (Rs L)"].sum():.1f}L total value</span></div>',
                         unsafe_allow_html=True)
                     show_n = st.slider(f"Show top N {label} pieces", 6, min(60, len(df)),
                                        min(per_page, len(df)), step=3,
@@ -2254,6 +2262,49 @@ def page_stock_intel(view_rso=None):
         apply_chart_style(fig, height=380)
         st.plotly_chart(fig, use_container_width=True)
 
+    with tab_price:
+        st.markdown("#### 💰 Price Band Analysis — Stock vs Sales")
+        st.caption("Compare what's sitting in stock vs what's actually selling, by price band.")
+
+        BANDS = [0, 0.5, 1, 2, 5, 10, 999]
+        LABELS = ["<50K", "50K–1L", "1–2L", "2–5L", "5–10L", "10L+"]
+
+        stock_copy = stock.copy()
+        stock_copy["Band"] = pd.cut(stock_copy["AMT_L"], bins=BANDS, labels=LABELS, right=False)
+
+        band_stock = stock_copy.groupby(["Band", "IS_STUDDED"], observed=True).agg(
+            Items=("ItemCode","count"), Value=("AMT_L","sum")).reset_index()
+        band_stock["Type"] = band_stock["IS_STUDDED"].map({True:"Studded", False:"Plain"})
+
+        fig1 = px.bar(band_stock, x="Band", y="Items", color="Type", barmode="stack",
+                      color_discrete_map={"Studded": RUBY, "Plain": GOLD},
+                      title="Items in Stock by Price Band")
+        fig1.update_traces(marker_cornerradius=4, marker_line_width=0)
+        apply_chart_style(fig1, height=320)
+        st.plotly_chart(fig1, use_container_width=True)
+
+        fig2 = px.bar(band_stock, x="Band", y="Value", color="Type", barmode="stack",
+                      color_discrete_map={"Studded": RUBY, "Plain": GOLD},
+                      title="Value in Stock (₹L) by Price Band")
+        fig2.update_traces(marker_cornerradius=4, marker_line_width=0)
+        apply_chart_style(fig2, height=320)
+        st.plotly_chart(fig2, use_container_width=True)
+
+        # Compare with sales if hist available
+        if not hist.empty:
+            hist_copy = hist.copy()
+            hist_copy["Band"] = pd.cut(hist_copy["CMTOTAL"], bins=BANDS, labels=LABELS, right=False)
+            band_sales = hist_copy.groupby(["Band","IS_STUDDED"], observed=True).agg(
+                Bills=("CMTOTAL","count"), Value=("CMTOTAL","sum")).reset_index()
+            band_sales["Type"] = band_sales["IS_STUDDED"].map({True:"Studded", False:"Plain"})
+
+            st.markdown("##### Historical sales velocity by price band")
+            fig3 = px.bar(band_sales, x="Band", y="Bills", color="Type", barmode="stack",
+                          color_discrete_map={"Studded": RUBY, "Plain": GOLD},
+                          title="Bills Sold (5-year) by Price Band")
+            fig3.update_traces(marker_cornerradius=4, marker_line_width=0)
+            apply_chart_style(fig3, height=300)
+            st.plotly_chart(fig3, use_container_width=True)
 
 
 def product_card(img_url, title, lines, badge=None):
@@ -2324,7 +2375,7 @@ def push_rec_card(r):
       SKU: <b style="color:{ESPRESSO}">{r.get("ItemCode","—")}</b>
       &nbsp;·&nbsp; {r.get("Category","—")}</div>
     <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:10px;">
-      <span style="font-size:17px;font-weight:700;color:{GOLD_DEEP};">₹{r.get("Value (₹L)",0):.2f}L</span>
+      <span style="font-size:17px;font-weight:700;color:{GOLD_DEEP};">₹{r.get("Value (Rs L)",0):.2f}L</span>
       <span style="font-size:12px;color:{MUTED};">{r.get("Wt (g)",0):.1f} g</span>
     </div>
     <div style="border-top:1px dashed rgba(201,162,39,0.45);padding-top:9px;">
@@ -2388,6 +2439,28 @@ def page_sludge(sludge, month):
 
     st.markdown(f"<div class='small-muted' style='margin:6px 0 12px'>{len(df)} pieces shown</div>",
                 unsafe_allow_html=True)
+
+    # ── SELL-DOWN CALCULATOR ──────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("#### 🧮 Sell-Down Calculator")
+    st.caption("Select sludge items you plan to pitch this week — see your total incentive instantly.")
+
+    if "INCENTIVE" in df.columns and "ItemCode" in df.columns:
+        calc_df = df[["ItemCode","Product","Category","Cur-Final","INCENTIVE","Age"]].copy()
+        calc_df["Cur-Final"]  = calc_df["Cur-Final"].fillna(0)
+        calc_df["INCENTIVE"]  = calc_df["INCENTIVE"].fillna(0)
+        calc_df["Label"]      = calc_df.apply(
+            lambda r: f"{r['ItemCode']} · {str(r.get('Product',''))[:30]} · ₹{r['INCENTIVE']:,.0f} incentive", axis=1)
+        sel_items = st.multiselect("Pick items to pitch", calc_df["Label"].tolist(),
+                                   key="sludge_calc_sel")
+        if sel_items:
+            sel_df = calc_df[calc_df["Label"].isin(sel_items)]
+            tc1, tc2, tc3 = st.columns(3)
+            with tc1: kpi("Items selected",     f"{len(sel_df)}")
+            with tc2: kpi("Total selling price", f"₹{sel_df['Cur-Final'].sum():,.0f}")
+            with tc3: kpi("💰 Your incentive",   f"₹{sel_df['INCENTIVE'].sum():,.0f}")
+
+    st.markdown("---")
 
     # ---- product grid (3 per row) ----
     rows = df.to_dict("records")
@@ -2473,12 +2546,37 @@ def page_cn(cn: pd.DataFrame, view_rso, role):
         st.markdown(f"### 🔴 Action Required — {len(alerts)} CNs")
         st.caption("FREE CNs must be booked against a bill. GHS/ADVBOOK/CO overdue must be closed.")
 
+        if "cn_assignments" not in st.session_state:
+            st.session_state.cn_assignments = {}
+
         if len(alerts):
             st.dataframe(
                 _fmt(alerts.sort_values("DAYS", ascending=False))
                 .style.apply(_red_style, axis=1),
                 hide_index=True, use_container_width=True,
             )
+            # ── Assignment panel ──────────────────────────────────────────
+            if is_mgr and "CN NO." in alerts.columns:
+                with st.expander("📌 Assign a CN to an RSO", expanded=False):
+                    all_rsos_cn = sorted(priority1["RSO NAME"].dropna().unique().tolist())
+                    ac1, ac2, ac3 = st.columns([2, 2, 1])
+                    with ac1:
+                        cn_nos = alerts["CN NO."].dropna().astype(str).tolist()
+                        sel_cn = st.selectbox("CN No.", cn_nos, key="cn_assign_no")
+                    with ac2:
+                        sel_assignee = st.selectbox("Assign to RSO", all_rsos_cn, key="cn_assign_rso")
+                        sel_status   = st.selectbox("Status", ["Following Up","Resolved","Open"], key="cn_assign_status")
+                    with ac3:
+                        note = st.text_input("Note", key="cn_assign_note")
+                        if st.button("Save", key="cn_assign_save", use_container_width=True):
+                            st.session_state.cn_assignments[sel_cn] = {
+                                "rso": sel_assignee, "status": sel_status, "note": note}
+                            st.success(f"CN {sel_cn} → {sel_assignee}")
+                            st.rerun()
+                if st.session_state.cn_assignments:
+                    adf = pd.DataFrame([{"CN No.": k, **v}
+                                        for k, v in st.session_state.cn_assignments.items()])
+                    st.dataframe(adf, hide_index=True, use_container_width=True)
         else:
             st.success("No alerts in Priority 1 CNs.")
 
@@ -3247,6 +3345,64 @@ def main():
             pages += ["Admin", "Data Manager"]
         page = st.radio("Navigate", pages)
 
+        # ── Month-end pressure widget ─────────────────────────────────────
+        st.divider()
+        today_d = dt.date.today()
+        days_in_month = (dt.date(today_d.year, today_d.month % 12 + 1, 1)
+                         - dt.timedelta(days=1)).day if today_d.month < 12 else 31
+        days_left = days_in_month - today_d.day
+        pct_elapsed = today_d.day / days_in_month
+
+        if view_rso:
+            _rso_key = view_rso
+        elif my_rso:
+            _rso_key = my_rso
+        else:
+            _rso_key = None
+
+        if _rso_key:
+            cur_month_sales = sales[(sales["MONTH"] == int(months[-1])) & (~sales["IS_RETURN"])
+                                    & (sales["RSO_FINAL"] == _rso_key)]
+            rso_val  = cur_month_sales["CMTOTAL"].clip(lower=0).sum()
+            tgt_rows = rso_targets[(rso_targets["MONTH"] == int(months[-1])) &
+                                   (rso_targets["EMPLOYEE NAME"] == _rso_key)]
+            rso_tgt  = float(tgt_rows["TOTAL"].values[0]) if len(tgt_rows) else 0
+            remaining = max(rso_tgt - rso_val, 0)
+            per_day   = remaining / days_left if days_left > 0 else remaining
+            pct_done  = rso_val / rso_tgt if rso_tgt else 0
+            bar_color = "#10B981" if pct_done >= pct_elapsed else (
+                        "#F59E0B" if pct_done >= pct_elapsed * 0.7 else "#EF4444")
+            st.markdown(
+                f'<div style="background:rgba(255,255,255,0.07);border-radius:10px;padding:10px 12px;">'
+                f'<div style="font-size:11px;font-weight:700;letter-spacing:1px;color:#C9A227;'
+                f'margin-bottom:6px;">MONTH-END PRESSURE</div>'
+                f'<div style="font-size:20px;font-weight:800;color:white;">'
+                f'₹{rso_val:.1f}L <span style="font-size:13px;font-weight:400;color:#ccc;">/ ₹{rso_tgt:.0f}L</span></div>'
+                f'<div style="background:#333;border-radius:4px;height:5px;margin:6px 0;">'
+                f'<div style="background:{bar_color};width:{min(pct_done*100,100):.0f}%;height:5px;border-radius:4px;"></div></div>'
+                f'<div style="font-size:11px;color:#ccc;">{days_left}d left · need ₹{per_day:.1f}L/day</div>'
+                f'</div>', unsafe_allow_html=True)
+        else:
+            # Store-level pressure
+            cur_m = int(months[-1])
+            store_val = sales[(sales["MONTH"] == cur_m) & (~sales["IS_RETURN"])]["CMTOTAL"].clip(lower=0).sum()
+            store_tgt = store_targets[store_targets["MONTH"] == cur_m]["TOTAL"].sum() if len(store_targets) else 0
+            remaining = max(store_tgt - store_val, 0)
+            per_day   = remaining / days_left if days_left > 0 else remaining
+            pct_done  = store_val / store_tgt if store_tgt else 0
+            bar_color = "#10B981" if pct_done >= pct_elapsed else (
+                        "#F59E0B" if pct_done >= pct_elapsed * 0.7 else "#EF4444")
+            st.markdown(
+                f'<div style="background:rgba(255,255,255,0.07);border-radius:10px;padding:10px 12px;">'
+                f'<div style="font-size:11px;font-weight:700;letter-spacing:1px;color:#C9A227;'
+                f'margin-bottom:6px;">STORE PRESSURE</div>'
+                f'<div style="font-size:20px;font-weight:800;color:white;">'
+                f'₹{store_val:.1f}L <span style="font-size:13px;font-weight:400;color:#ccc;">/ ₹{store_tgt:.0f}L</span></div>'
+                f'<div style="background:#333;border-radius:4px;height:5px;margin:6px 0;">'
+                f'<div style="background:{bar_color};width:{min(pct_done*100,100):.0f}%;height:5px;border-radius:4px;"></div></div>'
+                f'<div style="font-size:11px;color:#ccc;">{days_left}d left · need ₹{per_day:.1f}L/day</div>'
+                f'</div>', unsafe_allow_html=True)
+
         st.divider()
         if st.button("🔄 Refresh Data", use_container_width=True):
             st.session_state.refresh_token = dt.datetime.now().timestamp()
@@ -3282,7 +3438,7 @@ def main():
     elif page == "Customers":
         page_customers(sales, ghs, cn, hist, month, view_rso, role)
     elif page == "Stock":
-        page_stock_intel(view_rso=view_rso)
+        page_stock_intel(view_rso=view_rso, hist=hist)
     elif page == "Sludge":
         page_sludge(sludge, month)
     elif page == "Analytics":

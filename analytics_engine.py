@@ -155,71 +155,82 @@ def stock_summary(stock: pd.DataFrame) -> dict:
     }
 
 
+STUDDED_CATS = {"Gold Studded", "Studded - Solitaire", "Studded - Color Stones",
+                "Gold intensive studded", "High Value Studded", "MIA Studded",
+                "Ultra-Low diamond", "Glass Kundan", "Plain Jewellery with Stones"}
+
 def stock_push_recommendations(stock: pd.DataFrame, rfm: pd.DataFrame,
                                 rso_filter: str = None,
-                                top_n: int = 20) -> pd.DataFrame:
+                                top_n: int = 40) -> pd.DataFrame:
     """
     For each stock piece, find the best-fit customer from the RSO's book.
     Scoring: category_match(0/1) + price_proximity(0-1) + urgency(0-1 from recency)
+    Studded and plain pools are ranked independently so studded is never crowded out.
     """
     if stock.empty or rfm.empty:
         return pd.DataFrame()
 
-    rows = []
     rfm_active = rfm.copy()
     if rso_filter:
         rfm_active = rfm_active[rfm_active["rso"] == rso_filter.upper()]
-
-    # Focus on lapsed / at-risk customers only (worth calling)
     rfm_active = rfm_active[rfm_active["recency_days"].between(30, 730)]
-
-    for _, item in stock.iterrows():
-        cat = item.get("Category","")
-        amt_l = item["AMT_L"]
-        is_stud = item["IS_STUDDED"]
-
-        # Find customers with matching category preference
-        cat_match = rfm_active[rfm_active["fav_cat"] == cat].copy()
-        if cat_match.empty:
-            # Fallback: studded buyers for studded stock, plain for plain
-            if is_stud:
-                cat_match = rfm_active[rfm_active["has_studded"] == True].copy()
-            else:
-                cat_match = rfm_active[rfm_active["has_studded"] == False].head(5).copy()
-
-        if cat_match.empty:
-            continue
-
-        # Price proximity score: 1 if same band, 0 if 5x off
-        cat_match = cat_match.copy()
-        cat_match["price_score"] = 1 / (1 + abs(cat_match["avg_ticket_L"] - amt_l) / max(amt_l, 0.1))
-        # Urgency: prefer customers who haven't visited in 60-200 days (warm window)
-        cat_match["urgency"] = cat_match["recency_days"].apply(
-            lambda d: 1.0 if 60 <= d <= 200 else (0.6 if d < 60 else 0.3))
-        cat_match["score"] = cat_match["price_score"] * 0.5 + cat_match["urgency"] * 0.5
-
-        best = cat_match.nlargest(1,"score").iloc[0]
-        rows.append({
-            "ItemCode":  item.get("ItemCode",""),
-            "Category":  cat,
-            "Product":   item.get("Product",""),
-            "IS_STUDDED": is_stud,
-            "Value (₹L)": round(amt_l, 2),
-            "Wt (g)":    round(item["WT"], 2),
-            "THEME":     item.get("THEME",""),
-            "IMG":       item.get("IMG",""),
-            "Best Customer": best["CUSTOMERNAME"],
-            "Customer Mobile": str(int(best["mobile"])) if pd.notna(best["mobile"]) else "—",
-            "Last Visit (days)": int(best["recency_days"]),
-            "Segment": str(best["segment"]),
-            "RSO": best["rso"].title(),
-            "Match Score": round(best["score"], 2),
-        })
-
-    if not rows:
+    if rfm_active.empty:
         return pd.DataFrame()
-    result = pd.DataFrame(rows).sort_values("Match Score", ascending=False)
-    return result.head(top_n).reset_index(drop=True)
+
+    studded_pool = rfm_active[rfm_active["has_studded"] == True].copy()
+    plain_pool   = rfm_active[rfm_active["has_studded"] == False].copy()
+
+    def _match_items(subset: pd.DataFrame) -> list:
+        rows = []
+        for _, item in subset.iterrows():
+            cat    = item.get("Category", "")
+            amt_l  = item["AMT_L"]
+            is_stud = item["IS_STUDDED"]
+
+            pool = studded_pool if is_stud else plain_pool
+            if pool.empty:
+                pool = rfm_active
+
+            cat_match = pool[pool["fav_cat"] == cat].copy()
+            if cat_match.empty:
+                cat_match = pool.copy()
+            if cat_match.empty:
+                continue
+
+            cat_match["price_score"] = 1 / (
+                1 + abs(cat_match["avg_ticket_L"] - amt_l) / max(amt_l, 0.1))
+            cat_match["urgency"] = cat_match["recency_days"].apply(
+                lambda d: 1.0 if 60 <= d <= 200 else (0.6 if d < 60 else 0.3))
+            cat_match["score"] = cat_match["price_score"] * 0.6 + cat_match["urgency"] * 0.4
+
+            best = cat_match.nlargest(1, "score").iloc[0]
+            rows.append({
+                "ItemCode":           item.get("ItemCode", ""),
+                "Category":           cat,
+                "Product":            item.get("Product", ""),
+                "IS_STUDDED":         is_stud,
+                "Value (Rs L)":       round(amt_l, 2),
+                "Wt (g)":             round(item["WT"], 2),
+                "THEME":              item.get("THEME", ""),
+                "IMG":                item.get("IMG", ""),
+                "Best Customer":      best["CUSTOMERNAME"],
+                "Customer Mobile":    str(int(best["mobile"])) if pd.notna(best["mobile"]) else "—",
+                "Last Visit (days)":  int(best["recency_days"]),
+                "Segment":            str(best["segment"]),
+                "RSO":                best["rso"].title(),
+                "Match Score":        round(best["score"], 2),
+            })
+        return rows
+
+    stud_rows  = _match_items(stock[stock["IS_STUDDED"]])
+    plain_rows = _match_items(stock[~stock["IS_STUDDED"]])
+
+    stud_df  = (pd.DataFrame(stud_rows).sort_values("Match Score", ascending=False).head(top_n)
+                if stud_rows else pd.DataFrame())
+    plain_df = (pd.DataFrame(plain_rows).sort_values("Match Score", ascending=False).head(top_n)
+                if plain_rows else pd.DataFrame())
+
+    return pd.concat([stud_df, plain_df], ignore_index=True)
 
 
 def october_forecast(hist: pd.DataFrame) -> dict:
