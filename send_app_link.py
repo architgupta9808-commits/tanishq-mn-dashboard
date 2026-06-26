@@ -4,6 +4,15 @@ Prints WhatsApp-ready messages with install instructions for RSOs.
 """
 DASHBOARD_URL = "https://tanishq-mn-dashboard.streamlit.app"
 
+# Management logins (for reference when sharing)
+MGMT_LOGINS = {
+    "Swaroop":  ("swaroop", "mn2026"),
+    "Rashmi":   ("rashmi",  "fm2026"),
+    "Deepesh":  ("deepesh", "fm2026"),
+    "Archit":   ("archit",  "md2026"),
+    "Rakesh":   ("rakesh",  "md2026"),
+}
+
 ANDROID_INSTALL_MSG = f"""
 💎 *Tanishq MN Dashboard — Install on Your Phone*
 

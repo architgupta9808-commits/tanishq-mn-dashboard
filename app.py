@@ -638,10 +638,10 @@ PRESSURE_COLOR = {"RISE": GREEN, "FREEZE": "#5B8DEF", "DEFLECT": AMBER,
 MANAGEMENT_USERS = {
     "admin":   dict(pwd="admin",   role="Admin",          name="Admin"),
     "swaroop": dict(pwd="mn2026",  role="Store Manager",  name="Swaroop"),
-    "rashmi":  dict(pwd="floor1",  role="Floor Manager",  name="Rashmi"),
-    "deepesh": dict(pwd="floor2",  role="Floor Manager",  name="Deepesh"),
-    "archit":  dict(pwd="md",      role="MD",             name="Archit (MD)"),
-    "father":  dict(pwd="md",      role="MD",             name="MD Sir"),
+    "rashmi":  dict(pwd="fm2026",  role="Floor Manager",  name="Rashmi"),
+    "deepesh": dict(pwd="fm2026",  role="Floor Manager",  name="Deepesh"),
+    "archit":  dict(pwd="md2026",  role="MD",             name="Archit"),
+    "rakesh":  dict(pwd="md2026",  role="MD",             name="Rakesh"),
 }
 RSO_PWD = "rso2026"   # shared simple password for every RSO login (prototype)
 
@@ -2881,7 +2881,7 @@ def page_data_manager(role):
     st.markdown("## 📤 Data Manager")
     st.caption("Upload fresh Excel files here. Dashboard refreshes automatically after upload.")
 
-    if role not in ("Admin", "Store Manager", "MD"):
+    if role not in ("Admin", "Store Manager", "Floor Manager", "MD"):
         st.warning("Only managers can upload data files.")
         return
 
