@@ -800,6 +800,21 @@ def load_sludge(_token: float) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner=False, ttl=300)
+def load_hist_cached(_token: float) -> pd.DataFrame:
+    if not AE_AVAILABLE:
+        return pd.DataFrame()
+    df = load_hist()
+    if df.empty:
+        return df
+    # Align column names to match current sales conventions
+    df = df.rename(columns={"RSO_H": "RSO_FINAL"})
+    df["MOBILE"] = df["MOBILE"].apply(
+        lambda x: str(int(x)) if pd.notna(x) and x == x else ""
+    )
+    return df
+
+
+@st.cache_data(show_spinner=False, ttl=300)
 def load_cn(_token: float) -> pd.DataFrame:
     try:
         df = pd.read_excel(CN_FILE)
@@ -991,21 +1006,33 @@ def pace_stats(month: int) -> dict:
 
 
 def follow_up_lists(sales: pd.DataFrame, ghs: pd.DataFrame,
-                    rso: str = None) -> dict:
+                    rso: str = None, hist_df: pd.DataFrame = None) -> dict:
     """Build three follow-up lists for an RSO (or whole store if rso=None).
 
     Returns:
-        lapsed   — customers not seen in 60+ days, sorted by lifetime value
+        lapsed   — customers not seen in 180+ days (uses full history when available)
+        warm     — customers not seen in 60-180 days (recent lapsed, worth a call)
         maturing — GHS/RGA accounts entering their maturity window (next 30 days)
         upsell   — customers who have never bought a studded piece
     """
     today = pd.Timestamp(dt.date.today())
     s = sales[~sales["IS_RETURN"]].copy()
+
+    # ── combine current + historical for true last-visit dates ──
+    COLS = ["CUSTOMERNAME", "DATE", "CMTOTAL", "RSO_FINAL", "MOBILE", "IS_STUDDED"]
+    frames = [s[[c for c in COLS if c in s.columns]]]
+    if hist_df is not None and not hist_df.empty:
+        h = hist_df[[c for c in COLS if c in hist_df.columns]].copy()
+        frames.append(h)
+    combined = pd.concat(frames, ignore_index=True)
+    combined = combined[combined["CMTOTAL"].fillna(0) >= 0]  # exclude returns
+
     if rso:
+        combined = combined[combined["RSO_FINAL"] == rso]
         s = s[s["RSO_FINAL"] == rso]
 
-    # ── lapsed: last purchase > 60 days ago ──
-    last_buy = (s.groupby("CUSTOMERNAME")
+    # ── build per-customer last-visit from combined history ──
+    last_buy = (combined.groupby("CUSTOMERNAME")
                  .agg(last_date=("DATE", "max"),
                       lifetime_val=("CMTOTAL", "sum"),
                       visits=("DATE", "count"),
@@ -1013,7 +1040,11 @@ def follow_up_lists(sales: pd.DataFrame, ghs: pd.DataFrame,
                       rso=("RSO_FINAL", "last"))
                  .reset_index())
     last_buy["days_since"] = (today - last_buy["last_date"]).dt.days
-    lapsed = (last_buy[last_buy["days_since"] > 60]
+
+    lapsed = (last_buy[last_buy["days_since"] > 180]
+              .sort_values("lifetime_val", ascending=False)
+              .reset_index(drop=True))
+    warm   = (last_buy[last_buy["days_since"].between(60, 180)]
               .sort_values("lifetime_val", ascending=False)
               .reset_index(drop=True))
 
@@ -1029,15 +1060,14 @@ def follow_up_lists(sales: pd.DataFrame, ghs: pd.DataFrame,
                   .reset_index(drop=True))
 
     # ── upsell: customers with ZERO studded history ──
-    has_studded = set(sales.loc[sales["IS_STUDDED"], "CUSTOMERNAME"].unique())
+    has_studded = set(combined.loc[combined["IS_STUDDED"].fillna(False), "CUSTOMERNAME"].unique())
     plain_only = last_buy[~last_buy["CUSTOMERNAME"].isin(has_studded)].copy()
     if rso:
-        # re-filter to only this RSO's customers
-        rso_custs = set(s["CUSTOMERNAME"].unique())
+        rso_custs = set(combined["CUSTOMERNAME"].unique())
         plain_only = plain_only[plain_only["CUSTOMERNAME"].isin(rso_custs)]
     upsell = plain_only.sort_values("lifetime_val", ascending=False).reset_index(drop=True)
 
-    return dict(lapsed=lapsed, maturing=maturing, upsell=upsell)
+    return dict(lapsed=lapsed, warm=warm, maturing=maturing, upsell=upsell)
 
 
 def inr(x) -> str:
@@ -1786,7 +1816,7 @@ def page_ghs(sales, ghs, month, view_rso, role):
 # ---------------------------------------------------------------------------
 # 11. PAGE — CUSTOMER DATA
 # ---------------------------------------------------------------------------
-def page_customers(sales, ghs, cn, month, view_rso, role):
+def page_customers(sales, ghs, cn, hist, month, view_rso, role):
     page_header("👥", "Customer Data", "Search · follow-up lists · upsell opportunities")
     scope = sales[sales["RSO_FINAL"] == view_rso] if view_rso else sales
     is_mgr = role in ("Admin", "Store Manager", "Floor Manager", "MD")
@@ -1899,28 +1929,41 @@ def page_customers(sales, ghs, cn, month, view_rso, role):
     # ── FOLLOW-UP LIST ─────────────────────────────────────────────────────────
     st.markdown("---")
     st.markdown("### 🔔 Follow-up List")
-    st.caption("Powered by your sales and GHS data. Prioritised by opportunity size.")
-    fl = follow_up_lists(sales, ghs, rso=view_rso)
+    st.caption("Powered by full sales history. Prioritised by lifetime value.")
+    fl = follow_up_lists(sales, ghs, rso=view_rso, hist_df=hist)
 
-    t_lapsed, t_mature, t_upsell = st.tabs([
-        f"⏰ Lapsed ({len(fl['lapsed'])})",
+    def _fmt_lapsed(df):
+        df = df.copy()
+        df["mobile"] = df["mobile"].apply(
+            lambda x: str(int(x)) if pd.notna(x) and str(x).replace(".","").isdigit() else str(x))
+        df["last_visit"]   = df["last_date"].dt.strftime("%d %b %Y")
+        df["lifetime_val"] = df["lifetime_val"].round(1).astype(str) + " L"
+        show = df[["CUSTOMERNAME","mobile","days_since","last_visit","lifetime_val","rso"]].copy()
+        show.columns = ["Customer","Mobile","Days Since Visit","Last Visit","Lifetime Value","RSO"]
+        return show
+
+    t_lapsed, t_warm, t_mature, t_upsell = st.tabs([
+        f"💤 Lost (180+ days) ({len(fl['lapsed'])})",
+        f"⏰ Warm (60–180 days) ({len(fl['warm'])})",
         f"⚠️ GHS Maturing ({len(fl['maturing'])})",
         f"💡 Upsell Opportunity ({len(fl['upsell'])})",
     ])
 
     with t_lapsed:
-        st.caption("Customers who haven't visited in **60+ days**, sorted by lifetime value. Call them first.")
-        df = fl["lapsed"].copy()
+        st.caption("Customers **not seen in 180+ days** from full history — highest reactivation value.")
+        df = fl["lapsed"]
         if len(df):
-            df["mobile"] = df["mobile"].apply(
-                lambda x: str(int(x)) if pd.notna(x) and str(x).replace(".","").isdigit() else str(x))
-            df["last_visit"] = df["last_date"].dt.strftime("%d %b %Y")
-            df["lifetime_val"] = df["lifetime_val"].round(1).astype(str) + " L"
-            show = df[["CUSTOMERNAME","mobile","days_since","last_visit","lifetime_val","rso"]].copy()
-            show.columns = ["Customer","Mobile","Days Since Visit","Last Visit","Lifetime Value","RSO"]
-            st.dataframe(show.head(100), hide_index=True, use_container_width=True)
+            st.dataframe(_fmt_lapsed(df).head(300), hide_index=True, use_container_width=True)
         else:
-            st.success("No lapsed customers — great retention! ✅")
+            st.success("No customers lost for 180+ days ✅")
+
+    with t_warm:
+        st.caption("Customers **60–180 days since last visit** — still warm, easiest to bring back.")
+        df = fl["warm"]
+        if len(df):
+            st.dataframe(_fmt_lapsed(df).head(200), hide_index=True, use_container_width=True)
+        else:
+            st.success("No warm lapsed customers right now ✅")
 
     with t_mature:
         st.caption("GHS/RGA accounts entering their maturity window. Reach out now before they go inactive.")
@@ -1945,11 +1988,11 @@ def page_customers(sales, ghs, cn, month, view_rso, role):
         if len(df):
             df["mobile"] = df["mobile"].apply(
                 lambda x: str(int(x)) if pd.notna(x) and str(x).replace(".","").isdigit() else str(x))
-            df["last_visit"] = df["last_date"].dt.strftime("%d %b %Y")
+            df["last_visit"]   = df["last_date"].dt.strftime("%d %b %Y")
             df["lifetime_val"] = df["lifetime_val"].round(1).astype(str) + " L"
             show = df[["CUSTOMERNAME","mobile","visits","last_visit","lifetime_val","rso"]].copy()
             show.columns = ["Customer","Mobile","Visits","Last Visit","Plain Value","RSO"]
-            st.dataframe(show.head(100), hide_index=True, use_container_width=True)
+            st.dataframe(show.head(200), hide_index=True, use_container_width=True)
         else:
             st.info("All customers have bought at least one studded piece!")
 
@@ -3169,6 +3212,7 @@ def main():
     rso_targets, store_targets = load_targets(st.session_state.refresh_token)
     sludge = load_sludge(st.session_state.refresh_token)
     cn = load_cn(st.session_state.refresh_token)
+    hist = load_hist_cached(st.session_state.refresh_token)
 
     # auth gate
     if not st.session_state.get("auth"):
@@ -3236,7 +3280,7 @@ def main():
     elif page == "GHS / RGA":
         page_ghs(sales, ghs, month, view_rso, role)
     elif page == "Customers":
-        page_customers(sales, ghs, cn, month, view_rso, role)
+        page_customers(sales, ghs, cn, hist, month, view_rso, role)
     elif page == "Stock":
         page_stock_intel(view_rso=view_rso)
     elif page == "Sludge":
