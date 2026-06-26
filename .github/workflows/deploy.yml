@@ -1,0 +1,14 @@
+name: Deploy to Streamlit Cloud
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'app.py'
+      - 'analytics_engine.py'
+      - 'requirements.txt'
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deployment triggered
+        run: echo "Push to main — Streamlit Cloud will auto-redeploy."
