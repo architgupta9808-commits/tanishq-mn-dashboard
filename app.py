@@ -734,12 +734,10 @@ def load_sales(_token: float) -> pd.DataFrame:
     for c in ["WT", "AMT", "CMTOTAL", "GHS-AMT", "GHS-RED", "GEP-WT", "GEP-AMT", "QTY"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
-    # BUG FIX: For multi-line bills, CMTOTAL is only on the first line.
-    # Subsequent lines have CMTOTAL=NaN but AMT holds each line's value portion.
-    # Fill null CMTOTAL with AMT only for sale rows (WT > 0), not returns.
-    null_cmtotal = df["CMTOTAL"].isna() & (df["WT"].fillna(0) > 0)
-    df.loc[null_cmtotal, "CMTOTAL"] = df.loc[null_cmtotal, "AMT"]
-    df["CMTOTAL"] = df["CMTOTAL"].fillna(0)  # zero out any remaining nulls (e.g. return rows)
+    # For multi-line bills: CMTOTAL is only on the first line (full invoice total).
+    # Subsequent lines have CMTOTAL=NaN (itemized breakdown). DO NOT fill with AMT
+    # as that would double-count the bill. Just zero out nulls to avoid breaking sums.
+    df["CMTOTAL"] = df["CMTOTAL"].fillna(0)
     df["MONTH"] = pd.to_numeric(df["MONTH"], errors="coerce").astype("Int64")
     df["FLAG"] = df["FLAG"].astype(str).str.strip().str.upper()
     df["IS_STUDDED"] = df["FLAG"] == "S"          # the one studded rule
